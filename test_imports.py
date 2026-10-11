@@ -38,10 +38,27 @@ class _SessionState(dict):
     """
 
 
+class _Columns(list):
+    """假的 st.columns() 返回值。
+
+    真实 Streamlit 的 st.columns(n) 返回一个**可下标的列表**，元素是列对象。
+    用普通 _Ctx 会在 `cols[0].button(...)` 处报
+    "'_Ctx' object is not subscriptable" ——
+    这个报错再次说明：桩要模拟**被用到的协议**（这里是"可下标"），
+    不能只模拟"属性能被访问"。
+    """
+
+    def __getattr__(self, item):
+        return _Ctx()
+
+
 class _Ctx:
     """既能被调用、也能用在 with 语句、还能链式取属性的万能假对象。"""
 
     def __call__(self, *a, **k):
+        # st.columns(n) 要返回可下标的列列表
+        if len(a) == 1 and isinstance(a[0], int) and not k:
+            return _Columns([_Ctx() for _ in range(a[0])])
         return self
 
     def __enter__(self):
