@@ -1,0 +1,12 @@
+# 依赖
+requests>=2.31.0
+python-dotenv>=1.0.0
+
+# 二期再加（真 RAG）
+# chromadb>=0.4.0
+# sentence-transformers>=2.2.0
+
+# 三期再加（Web 服务）
+# fastapi>=0.110.0
+# uvicorn>=0.27.0
+# streamlit>=1.32.0
