@@ -1,0 +1,13 @@
+# Secrets & local files
+.env
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Data & logs
+data/*.log
+*.log
+.DS_Store
+.idea/
+.vscode/
