@@ -102,10 +102,12 @@ if prompt := st.chat_input("输入你的问题…"):
     with st.chat_message("assistant"):
         with st.spinner("思考中…"):
             try:
-                agent.client  # 触发一次属性访问，确保 client 存在
                 answer = agent.chat(prompt)
                 trace = list(agent.trace)
             except Exception as e:  # noqa: BLE001 —— 界面兜底，不把 traceback 甩给用户
+                # 只显示异常类型和简短信息，不打印任何对象
+                # （早期版本这里有一句 `agent.client` 的调试代码，
+                #   会把带 API key 的 client 对象渲染到界面上，已删除）
                 answer = f"⚠️ 请求失败：`{type(e).__name__}`\n\n```\n{e}\n```"
                 trace = []
 
