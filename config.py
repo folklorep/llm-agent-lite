@@ -43,16 +43,44 @@ def _debug(msg: str) -> None:
     print(f"[config] {msg}", file=sys.stderr)
 
 
+def _get(name: str, default: str = "") -> str:
+    """按优先级读配置：环境变量 → Streamlit secrets → 默认值。
+
+    ⚠️ 为什么要多读一个地方（踩过的坑）：
+       本地运行时配置来自 .env（被 load_dotenv 写进 os.environ），
+       但部署到 **Streamlit Cloud** 时，平台上填的 Secrets 是注入到
+       `st.secrets` 里的，**不保证同步成环境变量**。
+       结果就是：本地跑得好好的，一上云就报"缺少 LLM_API_KEY"。
+
+       这段兜底让同一个配置层能同时服务 CLI、本地 Streamlit、云端 Streamlit。
+       注意用 try/except 包住 —— 不装 streamlit 的环境（比如只跑 CLI）不能因此崩掉。
+    """
+    value = os.getenv(name)
+    if value:
+        return value
+
+    try:                                    # 只在导入得到 streamlit 时才有意义
+        import streamlit as st
+
+        if name in st.secrets:
+            return str(st.secrets[name])
+    except Exception:                       # noqa: BLE001
+        # 没装 streamlit / 不在 Streamlit 环境 / secrets 文件不存在 —— 都属正常
+        pass
+
+    return default
+
+
 class Config:
-    """从环境变量读取配置，集中管理。"""
+    """配置集中管理。读取优先级：环境变量 → Streamlit secrets → 默认值。"""
 
     # 大模型 API
-    API_KEY: str = os.getenv("LLM_API_KEY", "")
-    BASE_URL: str = os.getenv("LLM_BASE_URL", "https://api.deepseek.com")
-    MODEL: str = os.getenv("LLM_MODEL", "deepseek-flash")
+    API_KEY: str = _get("LLM_API_KEY")
+    BASE_URL: str = _get("LLM_BASE_URL", "https://api.deepseek.com")
+    MODEL: str = _get("LLM_MODEL", "deepseek-flash")
 
     # 行为参数
-    DEBUG: bool = os.getenv("DEBUG", "false").lower() == "true"
+    DEBUG: bool = _get("DEBUG", "false").lower() == "true"
     TIMEOUT: int = 60
     MAX_TOOL_ROUNDS: int = 5      # 工具调用最大轮次，防止死循环
     MAX_HISTORY_TURNS: int = 20   # 滑动窗口：只保留最近 N 轮，控制 token 成本
