@@ -9,26 +9,37 @@
 设计要点（这些是给面试官看的"能演示的东西"）：
   1. **工具调用轨迹默认展开** —— 核心卖点是"模型连续调用多个工具"，
      光看回答看不出来，必须让轨迹可见
-  2. **提供示例问题按钮** —— 访客（HR / 面试官）不知道该问什么，给他三个
-  3. **防重复提交** —— 用 pending 缓冲 + 处理标记，避免同一次输入被处理多遍
+  2. **提供示例问题按钮** —— 访客（HR / 面试官）不知道该问什么，给他几个
+  3. **检索模式可切换** —— 三种模式的命中率是我实测过的（82% / 88% / 92%），
+     把开关放出来，访客可以自己对比"同一种问法，不同检索策略的差别"
+  4. **防重复提交** —— pending 缓冲，避免同一次输入被处理多遍
 """
 import uuid
 from typing import Optional
 
 import streamlit as st
 
+import rag
 from agent import Agent
 from config import config
 
 st.set_page_config(page_title="LLM Agent Lite", page_icon="🤖", layout="wide")
 
-# 示例问题：第三个故意是知识库里没有的，用来展示"防幻觉"
+# 示例问题：覆盖 4 类能力，最后一个故意是知识库里没有的
 EXAMPLES = [
     "帮我算 128乘37加15",
     "先算 144除以12，再算根号144，比较一下",
     "两数之和的解法是什么？",
-    "红烧肉怎么做？",
+    "什么是有效的括号的三道防线？",
+    "如何腌制四川泡菜？",       # 知识库里没有 → 展示防幻觉
 ]
+
+# 三种检索模式（命中率是实测数据，见 README 的「RAG 检索优化」一节）
+RETRIEVAL_MODES = {
+    "keyword": "关键词匹配（快、免费）— 实测 82%",
+    "vector": "向量检索（本地计算）— 实测 88%",
+    "rerank": "精排（多一次 API 调用）— 实测 92%",
+}
 
 
 # ------------------------------------------------------------------ 侧边栏
@@ -38,6 +49,20 @@ with st.sidebar:
 
     st.subheader("⚙️ 配置")
     st.text_input("模型", value=config.MODEL, key="model_display", disabled=True)
+
+    # 检索模式切换 —— 演示"不同策略的差别"
+    chosen = st.selectbox(
+        "检索模式",
+        options=list(RETRIEVAL_MODES.keys()),
+        format_func=lambda k: RETRIEVAL_MODES[k],
+        index=list(RETRIEVAL_MODES).index(getattr(config, "RETRIEVAL_MODE", "keyword"))
+        if getattr(config, "RETRIEVAL_MODE", "keyword") in RETRIEVAL_MODES else 0,
+        key="retrieval_mode",
+        help="切不同的模式问同一个问题，可以看到检索结果的差别。"
+             "命中率是我用 50 题测试集实测的。",
+    )
+    config.RETRIEVAL_MODE = chosen
+
     st.toggle("显示工具调用轨迹", value=True, key="show_trace")
 
     st.divider()
@@ -48,12 +73,22 @@ with st.sidebar:
         st.rerun()
 
     st.divider()
+    s = rag.stats()
+    st.subheader("📚 知识库")
+    st.caption(
+        f"**{s['chunks']} 个文本块** / {s['total_chars']:,} 字\n\n"
+        f"来源：{', '.join(s['sources'])}\n\n"
+        "语料是我自己的学习笔记，按 Markdown 标题切块，"
+        "每块前置了所属章节的路径。"
+    )
     st.subheader("💡 这个项目的核心能力")
     st.caption(
-        "**多工具自动循环**：模型可以先算一步、看结果、再决定下一步。\n\n"
-        "第二条示例问题就是演示这个 —— 它会连续调用"
-        "「计算器」和「平方根」两个工具。\n\n"
-        "第四条问的是知识库里没有的内容，它会**如实说不知道**（防幻觉）。"
+        "**① 多工具自动循环**：模型可以先算一步、看结果、再决定下一步。\n\n"
+        "第 2 条示例就是演示这个 —— 它会连续调用「计算器」和「平方根」。\n\n"
+        "**② 检索增强（RAG）**：知识库是我的学习笔记，按标题切块后检索。\n\n"
+        "第 5 条示例问的是知识库里**没有**的内容 —— 它会如实说不知道（防幻觉）。\n\n"
+        "**③ 检索策略可切换**：上面那个「检索模式」下拉框，"
+        "三种模式的命中率都是我用 50 题测试集实测的。"
     )
 
 
@@ -142,12 +177,14 @@ if typed:
 # 一次只处理一个；处理完立刻从队列移除，保证同一条输入不会被处理两次
 while st.session_state.pending_prompts:
     prompt = st.session_state.pending_prompts.pop(0)
+    used_mode = getattr(config, "RETRIEVAL_MODE", "keyword")
 
     st.session_state.messages.append({"role": "user", "content": prompt})
     with st.chat_message("user"):
         st.markdown(prompt)
 
     with st.chat_message("assistant"):
+        st.caption(f"检索模式：`{used_mode}`")
         with st.spinner("思考中…"):
             try:
                 answer = agent.chat(prompt)
@@ -167,5 +204,6 @@ while st.session_state.pending_prompts:
             "role": "assistant",
             "content": answer,
             "trace": trace,
+            "mode": used_mode,            # 记下当时用的是哪种检索模式
         }
     )
