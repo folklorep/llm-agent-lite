@@ -11,3 +11,6 @@ data/*.log
 .DS_Store
 .idea/
 .vscode/
+
+# 本地缓存（LLM 精排结果，属运行产物，不进仓库）
+data/rerank_cache.json

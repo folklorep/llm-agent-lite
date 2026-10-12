@@ -145,6 +145,7 @@ def evaluate(retriever: Retriever, chunks: List[Dict], questions: List[Dict],
             {
                 "question": item["question"],
                 "keyword": item["keyword"],
+                "kind": item.get("kind", "未分类"),
                 "hit": found,
                 "top_score": results[0]["score"] if results else 0.0,
                 "returned": [r["heading"] for r in results],
@@ -209,6 +210,12 @@ def main() -> None:
     ap = argparse.ArgumentParser(description="检索评测")
     ap.add_argument("--top-k", type=int, default=3, help="取前几条算命中（默认 3）")
     ap.add_argument("--show-miss", action="store_true", help="打印失败案例的详细内容")
+    ap.add_argument(
+        "--retriever",
+        choices=["keyword", "vector", "both"],
+        default="both",
+        help="用哪个检索器评测（默认两个都跑，方便对比）",
+    )
     args = ap.parse_args()
 
     chunks = load_corpus()
@@ -221,11 +228,46 @@ def main() -> None:
         print(f"测试集为空：请检查 {QUESTIONS_FILE}")
         return
 
-    result = evaluate(retrieve_keyword, chunks, questions, args.top_k,
-                      "关键词检索（基线）", args.show_miss)
+    results = []
 
-    print(f"\n  💡 这就是基线。实现向量检索后重跑本脚本，对比命中率变化。")
-    print(f"     基线命中率 = {result['rate'] * 100:.1f}%\n")
+    if args.retriever in ("keyword", "both"):
+        results.append(
+            evaluate(retrieve_keyword, chunks, questions, args.top_k,
+                     "关键词检索（基线）", args.show_miss)
+        )
+
+    if args.retriever in ("vector", "both"):
+        # 延迟导入：没装向量库相关依赖时不影响纯关键词评测
+        from vector_store import VectorStore, make_vector_retriever
+
+        store = VectorStore()
+        store.add(chunks)
+        results.append(
+            evaluate(make_vector_retriever(store), chunks, questions, args.top_k,
+                     "向量检索（词袋 + TF-IDF + 余弦）", args.show_miss)
+        )
+
+    # ---- 对比表 ----
+    if len(results) > 1:
+        print("\n" + "=" * 68)
+        print("  对比汇总")
+        print("=" * 68)
+        print(f"\n  {'检索器':<32} {'总命中率':>9}  {'原词':>7}  {'改写':>7}")
+        print("  " + "-" * 62)
+        for r in results:
+            g = r["by_kind"]
+            o = g.get("原词", (0, 1))
+            w = g.get("改写", (0, 1))
+            print(f"  {r['name']:<32} {r['hit']:>2}/{r['n']} = {r['rate'] * 100:>3.0f}%  "
+                  f"{o[0]:>2}/{o[1]}  {w[0]:>2}/{w[1]}")
+        delta = (results[-1]["rate"] - results[0]["rate"]) * 100
+        print(f"\n  变化：{delta:+.1f} 个百分点")
+        print()
+
+    print(f"\n  💡 基线命中率 = {results[0]['rate'] * 100:.1f}%")
+    if len(results) > 1:
+        print(f"     向量检索   = {results[-1]['rate'] * 100:.1f}%")
+    print()
 
 
 if __name__ == "__main__":
