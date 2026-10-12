@@ -14,3 +14,7 @@ data/*.log
 
 # 本地缓存（LLM 精排结果，属运行产物，不进仓库）
 data/rerank_cache.json
+
+# 评测运行产物
+rerank_50q_result.txt
+data/rerank_cache.json
