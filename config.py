@@ -85,6 +85,26 @@ class Config:
     MAX_TOOL_ROUNDS: int = 5      # 工具调用最大轮次，防止死循环
     MAX_HISTORY_TURNS: int = 20   # 滑动窗口：只保留最近 N 轮，控制 token 成本
 
+    # ---------------- 检索相关 ----------------
+    # 检索模式：keyword / vector / rerank
+    #   keyword  只做关键词打分（默认）—— 快、免费、不调 API       实测 82%
+    #   vector   词袋向量 + TF-IDF + 余弦 —— 本地计算，仍免费      实测 88%
+    #   rerank   粗排 + LLM 精排 —— 最准，但每次多一次 API 调用    实测 92%
+    # 实测数据与实验过程见 README 的「RAG 检索优化」一节。
+    RETRIEVAL_MODE: str = _get("RETRIEVAL_MODE", "keyword")
+    RERANK_RECALL_N: int = int(_get("RERANK_RECALL_N", "20") or 20)
+    RETRIEVAL_TOP_K: int = int(_get("RETRIEVAL_TOP_K", "3") or 3)
+
+    @classmethod
+    def recall_n(cls) -> int:
+        """精排前的召回数量。用 classmethod 而不是 @property ——
+        因为访问的是**类**（`config.recall_n()`），property 在类上取不到值。"""
+        return max(int(cls.RERANK_RECALL_N), 1)
+
+    @classmethod
+    def retrieval_top_k(cls) -> int:
+        return max(int(cls.RETRIEVAL_TOP_K), 1)
+
     @classmethod
     def chat_url(cls) -> str:
         return f"{cls.BASE_URL.rstrip('/')}/chat/completions"
