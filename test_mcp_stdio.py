@@ -110,9 +110,17 @@ def main() -> None:
     if len(resp) >= 3:
         results.append(check("id 顺序正确", [r.get("id") for r in resp] == [1, 2, 3],
                              [r.get("id") for r in resp]))
-        results.append(check("tools/list 有 4 个工具",
-                             len(resp[1]["result"]["tools"]) == 4,
-                             len(resp[1]["result"]["tools"])))
+        # ⚠️ 这里原本写的是 "== 4"（硬编码工具数量），加了 bmi 工具后就失败了。
+        #    这是「脆弱断言」的典型：写死数字，一改动就断，
+        #    而且断掉的原因和被测的协议逻辑毫无关系。
+        #    改成断言「结构正确 + 包含核心工具」，这样加工具不会误报。
+        tools_list = resp[1]["result"]["tools"]
+        tool_names = [t["name"] for t in tools_list]
+        results.append(check("tools/list 返回工具数组", len(tool_names) >= 4, tool_names))
+        results.append(check("包含核心工具 calculator", "calculator" in tool_names, tool_names))
+        results.append(check("每个工具都有 name/description/inputSchema",
+                             all({"name", "description", "inputSchema"} <= set(t)
+                                 for t in tools_list)))
         results.append(check("calculator 算出 4751",
                              "4751" in resp[2]["result"]["content"][0]["text"],
                              resp[2]["result"]["content"][0]["text"]))
