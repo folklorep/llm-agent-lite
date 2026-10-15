@@ -1,12 +1,13 @@
-# 依赖
-requests>=2.31.0
-python-dotenv>=1.0.0
+# ===== 核心依赖（必需）=====
+requests>=2.31.0          # 调用 LLM API
+streamlit>=1.32.0         # 网页界面（部署用）
+fastapi>=0.110.0          # HTTP 服务层
+uvicorn>=0.27.0           # 跑 FastAPI 的 ASGI 服务器
 
-# 二期再加（真 RAG）
-# chromadb>=0.4.0
+# ===== 可选依赖 =====
+# python-dotenv>=1.0.0    # config.py 有内置 .env 解析，不装也能跑
+
+# ===== 尚未使用（路线图上的下一步）=====
+# 用真实 embedding 替换词袋向量时需要（当前用 TF-IDF，无需额外依赖）
 # sentence-transformers>=2.2.0
-
-# 三期再加（Web 服务）
-# fastapi>=0.110.0
-# uvicorn>=0.27.0
-# streamlit>=1.32.0
+# chromadb>=0.4.0
