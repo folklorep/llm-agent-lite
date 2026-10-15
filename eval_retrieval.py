@@ -33,7 +33,7 @@
 import argparse
 import re
 from pathlib import Path
-from typing import Callable, Dict, List
+from typing import Callable, Dict, List, Optional
 
 from chunker import chunk_file
 
@@ -135,8 +135,19 @@ def retrieve_keyword(query: str, chunks: List[Dict], top_k: int = 3) -> List[Dic
 
 # ============================================================ 评测
 def evaluate(retriever: Retriever, chunks: List[Dict], questions: List[Dict],
-             top_k: int, name: str, show_miss: bool = False) -> Dict:
-    """跑评测，返回统计结果。"""
+             top_k: int, name: str) -> Dict:
+    """跑评测，**只收集结果不打印**。
+
+    为什么不在这里打印（重要的一次重构）：
+      原来每个检索器各自打印自己的报告，输出长这样：
+          「关键词检索：未命中的 9 题」+ 40 行详情
+          「向量检索：未命中的 6 题」+ 一堆详情
+      两个列表挨在一起又不标归属，**极容易看串**
+      （实测：用户就把"关键词失败 9 题"看成了"向量失败 9 题"）。
+
+      改成"先收集、后统一汇报"之后，就能画出「每题 × 每种模式」的对照表，
+      一眼看清哪题谁命中谁没命中 —— 从根上消除误读。
+    """
     hits = []
     for item in questions:
         results = retriever(item["question"], chunks, top_k)
@@ -152,58 +163,117 @@ def evaluate(retriever: Retriever, chunks: List[Dict], questions: List[Dict],
             }
         )
 
-    n = len(hits)
-    n_hit = sum(1 for h in hits if h["hit"])
-    rate = n_hit / n if n else 0.0
-
-    print("=" * 68)
-    print(f"  检索评测：{name}")
-    print("=" * 68)
-    print(f"\n  语料：{len(chunks)} 块")
-    print(f"  测试集：{n} 题")
-    print(f"  评估口径：命中率@{top_k}（正确答案在前 {top_k} 条里算命中）\n")
-    print(f"  ┌─────────────────────────────────────┐")
-    print(f"  │  总命中率@{top_k} = {n_hit}/{n} = {rate * 100:5.1f}%        │")
-    print(f"  └─────────────────────────────────────┘")
-
-    # ---- 分组统计：原词 vs 改写（这是看出差距的关键）----
     by_kind: Dict[str, List[Dict]] = {}
     for h, q in zip(hits, questions):
         by_kind.setdefault(q["kind"], []).append(h)
 
-    if len(by_kind) > 1:
-        print(f"\n  ── 分组命中率 ──")
-        for kind, group in by_kind.items():
-            gh = sum(1 for g in group if g["hit"])
-            bar_len = round(20 * gh / len(group))
-            bar = "█" * bar_len + "░" * (20 - bar_len)
-            print(f"    {kind:<8} {bar}  {gh}/{len(group)}  ({gh / len(group) * 100:.0f}%)")
-
-    miss = [h for h in hits if not h["hit"]]
-    if miss:
-        print(f"\n  ── 未命中的 {len(miss)} 题 ──")
-        for h in miss:
-            print(f"\n  ❌ {h['question']}")
-            print(f"     期望关键词：{h['keyword']}")
-            print(f"     实际返回：{h['returned'] or '（空）'}")
-            if show_miss:
-                results = retriever(h["question"], chunks, top_k)
-                for r in results:
-                    preview = r["text"][:80].replace("\n", " ")
-                    print(f"       [score={r['score']}] {preview}...")
-    else:
-        print(f"\n  🎉 全部命中")
-
-    print("\n" + "=" * 68)
+    n = len(hits)
+    n_hit = sum(1 for h in hits if h["hit"])
     return {
         "name": name,
         "top_k": top_k,
         "n": n,
         "hit": n_hit,
-        "rate": rate,
+        "rate": n_hit / n if n else 0.0,
         "by_kind": {k: (sum(1 for g in v if g["hit"]), len(v)) for k, v in by_kind.items()},
         "detail": hits,
     }
+
+
+def report(results: List[Dict], questions: List[Dict], top_k: int,
+           retriever_names: List[str], show_miss: bool = False,
+           retrievers: Optional[List] = None, chunks: Optional[List[Dict]] = None) -> None:
+    """统一出一份报告：汇总 + 分组 + **每题 × 每种模式的对照表**。"""
+    W = 78
+    print("=" * W)
+    print("  检索评测报告")
+    print("=" * W)
+    print(f"\n  测试集 {len(questions)} 题 / 评估口径：命中率@{top_k}"
+          f"（正确答案出现在返回的前 {top_k} 条里算命中）\n")
+
+    # ---------------- 汇总 ----------------
+    print(f"  {'检索器':<30} {'总命中率':>10}  {'原词':>8}  {'改写':>8}")
+    print("  " + "-" * 62)
+    for r in results:
+        g = r["by_kind"]
+        o = g.get("原词", (0, 1))
+        w = g.get("改写", (0, 1))
+        print(f"  {r['name']:<30} {r['hit']:>2}/{r['n']} = {r['rate']*100:>3.0f}%  "
+              f"{o[0]:>2}/{o[1]} = {o[0]/o[1]*100:>3.0f}%  {w[0]:>2}/{w[1]} = {w[0]/w[1]*100:>3.0f}%")
+
+    if len(results) > 1:
+        delta = (results[-1]["rate"] - results[0]["rate"]) * 100
+        print(f"\n  变化：{delta:+.1f} 个百分点")
+
+    # ---------------- ⭐ 每题 × 每种模式 对照表 ----------------
+    if len(results) > 1:
+        print(f"\n{'=' * W}")
+        print("  ⭐ 逐题对照（✓ = 命中，✗ = 未命中）")
+        print("=" * W)
+        print("  ⚠️ 下面每一行都是【同一道题】在各模式下的表现 —— 不要跨行看串 ⚠️")
+        print()
+
+        # 表头（让"哪一种模式"一眼可辨）
+        head = f"  {'题目':<40}"
+        for i in range(len(results)):
+            head += f" {chr(65+i):>3}"
+        print(head)
+        print("  " + "-" * (40 + 4 * len(results)))
+        for i, r in enumerate(results):
+            print(f"    {chr(65+i)} = {r['name'][:60]}")
+        print()
+
+        # 逐题
+        for qi, q in enumerate(questions):
+            marks = []
+            for r in results:
+                d = r["detail"][qi]
+                marks.append("  ✓" if d["hit"] else "  ✗")
+            line = f"  {q['question'][:38]:<40}" + "".join(f"{m:>4}" for m in marks)
+            print(line)
+
+        # 每题的差异小结
+        print(f"\n  ── 各模式之间的差异（只列出结果不一致的题）──")
+        diff_found = False
+        for qi, q in enumerate(questions):
+            flags = [r["detail"][qi]["hit"] for r in results]
+            if len(set(flags)) > 1:      # 结果不一致
+                diff_found = True
+                pattern = " ".join(
+                    f"{chr(65+i)}:{'✓' if f else '✗'}" for i, f in enumerate(flags)
+                )
+                win = [chr(65 + i) for i, f in enumerate(flags) if f]
+                lose = [chr(65 + i) for i, f in enumerate(flags) if not f]
+                print(f"\n  [{q['kind']}] {q['question']}")
+                print(f"      期望关键词：{q['keyword']!r}")
+                print(f"      {pattern}   → 命中: {','.join(win) or '无'}   "
+                      f"未命中: {','.join(lose) or '无'}")
+                if show_miss and retrievers and chunks:
+                    for i, f in enumerate(flags):
+                        if not f:
+                            print(f"      {chr(65+i)} 返回的前 3 条：")
+                            for r in retrievers[i](q["question"], chunks, top_k):
+                                print(f"         [score={r['score']}] {r['heading'][:48]}")
+        if not diff_found:
+            print("\n    （各模式结果完全一致）")
+
+    # ---------------- 全部失败的题（谁也搞不定）----------------
+    if len(results) > 1:
+        all_fail = [qi for qi in range(len(questions))
+                    if not any(r["detail"][qi]["hit"] for r in results)]
+        if all_fail:
+            print(f"\n{'=' * W}")
+            print(f"  ⚠️ 所有模式都失败的题（{len(all_fail)} 题）—— 这是真正的能力边界")
+            print("=" * W)
+            for qi in all_fail:
+                q = questions[qi]
+                print(f"\n  [{q['kind']}] {q['question']}")
+                print(f"      期望关键词：{q['keyword']!r}")
+                if show_miss and retrievers and chunks:
+                    for i, _ in enumerate(results):
+                        res = retrievers[i](q["question"], chunks, top_k)
+                        print(f"      {chr(65+i)} 返回：{[r['heading'][:30] for r in res]}")
+    print("\n" + "=" * W)
 
 
 def main() -> None:
@@ -229,11 +299,12 @@ def main() -> None:
         return
 
     results = []
+    retrievers = []
 
     if args.retriever in ("keyword", "both"):
+        retrievers.append(retrieve_keyword)
         results.append(
-            evaluate(retrieve_keyword, chunks, questions, args.top_k,
-                     "关键词检索（基线）", args.show_miss)
+            evaluate(retrieve_keyword, chunks, questions, args.top_k, "关键词检索（基线）")
         )
 
     if args.retriever in ("vector", "both"):
@@ -242,32 +313,14 @@ def main() -> None:
 
         store = VectorStore()
         store.add(chunks)
+        vec = make_vector_retriever(store)
+        retrievers.append(vec)
         results.append(
-            evaluate(make_vector_retriever(store), chunks, questions, args.top_k,
-                     "向量检索（词袋 + TF-IDF + 余弦）", args.show_miss)
+            evaluate(vec, chunks, questions, args.top_k, "向量检索（词袋+TF-IDF+余弦）")
         )
 
-    # ---- 对比表 ----
-    if len(results) > 1:
-        print("\n" + "=" * 68)
-        print("  对比汇总")
-        print("=" * 68)
-        print(f"\n  {'检索器':<32} {'总命中率':>9}  {'原词':>7}  {'改写':>7}")
-        print("  " + "-" * 62)
-        for r in results:
-            g = r["by_kind"]
-            o = g.get("原词", (0, 1))
-            w = g.get("改写", (0, 1))
-            print(f"  {r['name']:<32} {r['hit']:>2}/{r['n']} = {r['rate'] * 100:>3.0f}%  "
-                  f"{o[0]:>2}/{o[1]}  {w[0]:>2}/{w[1]}")
-        delta = (results[-1]["rate"] - results[0]["rate"]) * 100
-        print(f"\n  变化：{delta:+.1f} 个百分点")
-        print()
-
-    print(f"\n  💡 基线命中率 = {results[0]['rate'] * 100:.1f}%")
-    if len(results) > 1:
-        print(f"     向量检索   = {results[-1]['rate'] * 100:.1f}%")
-    print()
+    report(results, questions, args.top_k, [r["name"] for r in results],
+           show_miss=args.show_miss, retrievers=retrievers, chunks=chunks)
 
 
 if __name__ == "__main__":

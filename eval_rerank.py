@@ -244,7 +244,7 @@ def main() -> None:
 
     # ---- 对照组 1：纯粗排（不调 LLM）----
     base = evaluate(retrieve_keyword, chunks, questions, args.top_k,
-                    "① 纯关键词粗排（基线）", args.show_miss)
+                    "① 纯关键词粗排（基线）")
 
     # ---- 实验组 ----
     # 组合：召回数 × 是否混合召回
@@ -265,7 +265,7 @@ def main() -> None:
         print(f"\n  ── 正在跑：{name} ──")
         fn = make_rerank_retriever(client, cache, recall_n, hybrid=hybrid,
                                    chunks_ref=chunks)
-        r = evaluate(fn, chunks, questions, args.top_k, name, args.show_miss)
+        r = evaluate(fn, chunks, questions, args.top_k, name)
         results.append(r)
         cache.save()
     elapsed = time.time() - t_all
