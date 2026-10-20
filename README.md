@@ -19,6 +19,7 @@
 | **多工具自动循环** | 模型可连续调用多个工具，并根据中间结果决定下一步（带轮次上限保护）|
 | **可评测的 RAG** | 三种检索模式（82% / 88% / 92%），有 50 题测试集与量化实验记录 ↓ |
 | **MCP 服务器** | 工具按 MCP 协议暴露，任何 MCP 客户端（Claude Desktop / Cursor）可直接调用 |
+| **会话持久化** | 历史存 SQLite，服务重启后不丢；表设计为「独立列 + JSON 快照」混合方案 ↓ |
 | 异常兜底 | API 错误、非法 JSON 参数、工具内部异常均被捕获并回传给模型 |
 | 调用轨迹 | `--debug` 或 `/trace` 可查看每轮工具调用与返回结果 |
 
@@ -26,12 +27,13 @@
 
 ```
 main.py          CLI 入口（参数解析、交互循环、命令）
-api.py           HTTP 服务（FastAPI：/chat、/chat/stream SSE、会话管理）
+api.py           HTTP 服务（FastAPI：/chat、/chat/stream SSE、会话管理、/sessions）
 ui_app.py        网页界面（Streamlit，可切换检索模式对比效果）
 mcp_server.py    MCP 服务器（手写 JSON-RPC 2.0，把工具按协议暴露给外部客户端）
   └── agent.py   编排层：推理-行动循环、上下文裁剪、异常兜底   ← 核心
         ├── llm_client.py  协议层：HTTP 请求、tool_calls 解析、流式输出
         ├── tools.py       工具层：注册表 + Schema + 执行分发
+        ├── storage.py     存储层：SQLite 会话持久化（表设计 / 索引 / 参数化查询）
         └── rag.py         检索层：三种模式（keyword / vector / rerank）
               ├── chunker.py       切块：按 Markdown 标题切，带上下文
               └── vector_store.py  向量库：词袋 + TF-IDF + 余弦相似度
@@ -39,13 +41,17 @@ mcp_server.py    MCP 服务器（手写 JSON-RPC 2.0，把工具按协议暴露�
 config.py       配置层：环境变量集中管理
 ```
 
-**分层原则**：协议层只管通信，工具层只管干活，编排层只管决策。
-换模型平台只改 `config.py`，加工具只加一个装饰器函数。
+**分层原则**：协议层只管通信，工具层只管干活，编排层只管决策，存储层只管存取。
+换模型平台只改 `config.py`，加工具只加一个装饰器函数，换数据库只改 `storage.py`。
 
 **四个入口共用同一个 `Agent`**：CLI、HTTP、网页、MCP 只是四种"壳"，核心逻辑只有一份。
 
-**检索层的接口契约（`retrieve(query, top_k)`）从"关键词匹配"到"向量 + LLM 精排"
-换了两轮实现，调用方（`tools.py`）一行都没改** —— 这是当初把检索单独拆层的回报。
+**两次"只改一个文件就完成升级"的记录**（这是分层的回报）：
+
+| 升级 | 改了什么 | 调用方 |
+|---|---|---|
+| 检索层：关键词 → 向量 → 两段式精排 | 只改 `rag.py` 内部（`retrieve` 契约不变）| `tools.py` 一行没改 |
+| 会话存储：内存字典 → SQLite | 只加 `storage.py` + 给 `Agent` 传回调 | `agent.py` 主循环一行没改 |
 
 ## 🚀 快速开始
 
@@ -80,53 +86,123 @@ AI > 两数之和的解法是：用字典记录「数 → 下标」，边遍历�
 AI > 抱歉，我的知识库中没有红烧肉的做法，无法回答。   ← 防幻觉生效
 ```
 
-## 🧠 三个值得讲的设计决策
+## 🧠 四个值得讲的设计决策
 
 1. **为什么不用 LangChain？**
    框架把协议层和编排层都封装了，出问题难以定位。自己实现一遍后，
    能清楚说出 `tool_calls` 的消息协议、`role=tool` 回传的格式要求、
-   以及为什么必须原样保留 assistant 的 tool_calls 消息。
+   以及为什么必须原样保留 assistant 的 `tool_calls` 消息。
 
 2. **为什么要有轮次上限？**
    模型可能陷入"反复调用同一工具"的循环，无上限会持续烧 token。
    `MAX_TOOL_ROUNDS` 是成本与能力的折中。
+   **实测**：上限设成 1 时，模型调完工具就停了 —— 因为它**看不到工具结果**，
+   没机会做下一步决策。所以上限不能太小。
 
 3. **检索层为什么要抽成函数接口？**
    一期用关键词打分就能跑通全链路，二期换向量检索时调用方一行不改。
    先跑通链路再优化单点，比一开始就上向量库更容易交付。
+   **实际验证过两次**：关键词 → 向量 → 两段式精排，`tools.py` 一行没改。
+
+4. **为什么存储层用回调注入，而不是让 Agent 直接依赖？**
+   ```python
+   def __init__(self, ..., on_turn_end=None):
+       self.on_turn_end = on_turn_end      # 每轮结束把 history 交给外部
+   ```
+   这样 Agent 不知道数据存在哪（SQLite / Redis / 文件都行），
+   **测试时传 `None` 或换成 `:memory:` 就完全不碰真实数据**。
+   **这个设计帮我逮到一个真实问题**：最初把 `_STORE` 写死在模块 import 时创建，
+   结果测试创建的上百个会话全写进了真实数据库。改成可注入后才隔离干净。
 
 ## 🧪 测试
 
 ```bash
-python test_agent.py        # Agent 主循环 8 个用例（34 个断言）
-python test_edge_cases.py   # 边界场景：最后一轮调工具、中文返回值
-python test_imports.py      # 导入链路 + 路由 + 会话管理（桩模块，无需装 web 依赖）
-python smoke_test.py        # 检索层与工具层冒烟
+python test_agent.py        # Agent 主循环（34 个断言）
+python test_edge_cases.py   # 边界场景：最后一轮调工具、中文返回值（5）
+python test_imports.py      # 导入链路 + 路由 + 会话管理（22）
+python test_rag.py          # 检索层接口契约（27）
+python test_storage.py      # SQLite 持久化层（21）
+python test_mcp_stdio.py    # MCP stdio 传输（18）
+python test_config_priority.py  # 配置读取优先级（7）
+python smoke_test.py        # 冒烟
 ```
 
-| 文件 | 覆盖 | 依赖 |
-|---|---|---|
-| `test_agent.py` | 多轮循环、并行工具调用、轮次上限、异常兜底、上下文裁剪、reset | 无（假模型）|
-| `test_edge_cases.py` | 轮次耗尽后的 history 完整性、中文工具结果可序列化 | 无 |
-| `test_imports.py` | api 路由注册、模型默认值、503 错误处理、会话管理与淘汰 | 无（桩模块）|
-| `smoke_test.py` | 检索打分、工具执行与异常分支 | 无 |
-
-**全部测试不消耗 API 额度、不需要 API key。**
+**合计 134 个断言，全部不消耗 API 额度、不需要 API key。**
 做法是用**依赖注入**把 `LLMClient` 换成假模型（`FakeClient`），
-用 `sys.modules` 打桩顶替 fastapi / pydantic / streamlit。
+用 `sys.modules` 打桩顶替 fastapi / pydantic / streamlit，
+存储层则注入 `:memory:` 内存库。
 
-> ⚠️ `test_imports.py` 只验证「导入 + 注册 + 逻辑」，**不等于运行时已验证**。
-> 路由真正响应请求、Streamlit 真正渲染，仍需装依赖后实测。
+> ⚠️ **跑测试时务必检查退出码**，不要只看断言计数。
+> 我踩过一次：桩对象接口不匹配导致测试**中途崩溃**，
+> 但因为崩溃前已经打印了 12 个 `[PASS]`，汇总时看起来像"少跑了几条"，
+> 实际是 10 个断言根本没执行。
+> 正确做法：`if ($LASTEXITCODE -ne 0) { 报错 }`。
 
-### 测试抓到的两个真实缺陷
+### 测试抓到的四个真实缺陷
 
 | # | 缺陷 | 怎么发现的 |
 |---|---|---|
-| 1 | **上下文裁剪时机错误**：`_trim_history()` 在追加用户消息**之前**执行，导致每次发出去的 payload 比上限多 2 条，长对话下持续漂移、token 成本失控 | `test_agent.py` 用例 7 断言"history 长度 ≤ 上限"，实测 8 ≠ 7 |
+| 1 | **上下文裁剪时机错误**：`_trim_history()` 在追加用户消息**之前**执行，导致每次发出去的 payload 比上限多 2 条，长对话下持续漂移、token 成本失控 | `test_agent.py` 用例 7 断言"payload 长度 ≤ 上限" |
 | 2 | **503 错误处理是失效的**：`except RuntimeError` 写在 `/chat` 路由里，但 `Agent()` 是在 `_get_agent()` **内部**构造的，异常在到达路由前就抛出去了 → 缺 key 实际返回 500 而非 503 | `test_imports.py` 断言**异常类型**时抓到（只断言"抛异常了"会漏掉）|
+| 3 | **测试断言硬编码工具数量**：`len(tools) == 4`，新增一个工具就误报 | 加 `bmi` 工具后测试失败 —— 属"测实现细节而非契约"的脆弱断言 |
+| 4 | **桩对象未跟随接口变化**：`Agent` 新增 `history` / `on_turn_end` 参数后，`FakeAgent.__init__()` 不接受，直接 `TypeError` 崩溃 | 加上退出码校验后才发现（断言计数看不出崩溃）|
 
-> **教训**：断言要断言**具体的东西**。
-> 第 1 个 bug 是断言了精确数值才暴露；第 2 个 bug 如果只写 `assertRaises(Exception)` 就永远发现不了。
+> **教训**：
+> ① 断言要断言**具体的东西** —— 第 1 个缺陷是断言了精确数值才暴露；
+> 第 2 个如果只写 `assertRaises(Exception)` 就永远发现不了。
+> ② 断言要测**契约**而不是**实现细节** —— 第 3 个缺陷是 `== 4` 造成的。
+> ③ **"断言全绿" ≠ "测试跑完"** —— 第 4 个缺陷要求统计时必须看退出码。
+
+## 💾 会话持久化（SQLite）
+
+**解决什么问题**：原实现把会话存在内存字典（`_SESSIONS = {}`）里，
+进程一重启对话就全丢 —— 这是 `api.py` 注释里自己承认的局限。
+
+**现在的效果**：历史写进 SQLite 文件，重启后能读回来。
+
+```
+进程 1：用户说"我叫小明"  → 写进 data/sessions.db
+        ↓ 杀掉进程
+进程 2：全新进程（内存缓存 = 0）→ 用原 session_id 追问
+        → 正确回答"你叫小明"
+```
+
+### 表设计：独立列 + JSON 快照的混合方案
+
+| 列 | 用途 |
+|---|---|
+| `session_id` / `role` / `content` | **拆成独立列** → 支持分页、统计、按角色过滤、全文搜索 |
+| `payload` | **存整条 message 的 JSON** → 原样还原 `tool_calls` 等嵌套结构 |
+
+**为什么两边都要**：
+- 只存整段 JSON → 上面那些查询全得先捞出来解析
+- 只拆成列 → `tool_calls` 这种嵌套结构拆不清（一条消息可能有多个工具调用）
+
+**这是经过实测验证的**：5 条含 `tool_calls` 的消息，存进去再读出来
+`json.loads(json.dumps(x)) == x` 成立，**原样往返一致**。
+
+### 一个设计选择：用回调注入，而不是直接 import
+
+```python
+# Agent 构造函数
+def __init__(self, ..., on_turn_end=None):
+    self.on_turn_end = on_turn_end
+```
+
+**为什么不直接在 Agent 里 `import storage`**：
+① 解耦 —— Agent 不用知道数据存哪（SQLite / Redis / 文件都行）
+② **可测** —— 测试时传 `None` 或换成 `:memory:`，完全不碰真实数据
+
+**这个设计帮我逮到一个真实问题**：
+最初我把 `_STORE = SessionStore()` 写死在模块 import 时创建，
+结果跑测试时创建的上百个会话**全写进了真实数据库**（积了 110 个垃圾会话）。
+改成可注入之后，测试用 `:memory:`，跑完就没了。
+
+### 已知局限
+
+- **覆盖写**：每轮都重写全部消息。消息多时会慢，
+  更优是"增量写"，但要处理裁剪导致的不一致 —— 复杂度换性能，暂未做。
+- **单机**：SQLite 是单文件，多实例部署需要换 PostgreSQL 或 Redis。
 
 ## 🔬 RAG 检索优化：一次完整的实验记录
 
@@ -281,15 +357,31 @@ echo {"jsonrpc":"2.0","id":1,"method":"tools/list"} | python mcp_server.py
 
 - [x] P1 工程化拆分（config / llm_client / tools / rag / agent / cli）
 - [x] P2 多工具自动循环 + 轮次上限 + 异常兜底
-- [x] P4-部分 FastAPI 服务化（`api.py`：/chat、/chat/stream SSE、会话管理）
+- [x] P4 FastAPI 服务化（`api.py`：/chat、/chat/stream SSE、会话管理、/sessions）
 - [x] P5 部署上线（Streamlit Cloud），拿到公网 URL
 - [x] **P3 检索优化**：切块 + 评测框架 + 粗排精排两段式检索（见上节实验记录）
 - [x] **P7 MCP 服务器**：手写 JSON-RPC 2.0，工具可被外部 MCP 客户端调用
-- [x] P6-部分 测试（7 个文件，127 断言）
+- [x] **P9 会话持久化**：内存字典 → SQLite，重启不丢（见上节）
+- [x] P6 测试（7 个文件，134 断言，全部正常退出）
 - [ ] P3-续 用真实 embedding 模型替换词袋向量（需要可用的 embedding API）
-- [ ] P4-完成 装上 fastapi 后实测路由；流式支持多轮上下文
+- [ ] P10 容器化（Dockerfile）—— 当前开发环境未安装 Docker，暂未做
 - [ ] P8 自主检索循环（检索 → 模型判断资料是否够 → 不够就改写查询再检索）
-- [ ] P6-完成 迁移到 pytest + GitHub Actions
+- [ ] P6-续 迁移到 pytest + GitHub Actions
+
+## 🧭 我是怎么学这个项目的
+
+除了代码，仓库里还有一份 `项目笔记.md`（约 1400 行），记录的是**学习过程**而不是代码说明：
+
+- **13 个实验**：每个都是「改一点 → 跑 → 看差异」，比如把 `MAX_TOOL_ROUNDS` 从 5 改成 1、
+  给工具加一个 BMI 计算、把会话迁到 SQLite
+- **17 条「我原本以为 X，实际是 Y」**：比如我以为"关键词检索更准"（实测向量更准）、
+  以为"多轮对话成本是指数增长"（实际是平方）、以为"工具层兜底是为了防崩"
+  （真正价值是**保留模型的自我纠正机会**）
+- **被推翻的假设**：检索优化里有两个自己的假设被实测证伪，
+  这些负面结果也留在 README 的实验记录里
+
+**为什么写它**：`README` 说明"代码是什么"，笔记说明"我怎么验证它是对的"。
+
 
 ## ⚠️ 踩坑记录
 
