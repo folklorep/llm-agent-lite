@@ -18,7 +18,7 @@
    推理-行动循环（ReAct 风格），模型可以连续调用工具并根据中间结果
    调整策略；同时加了最大轮次保护和工具级异常兜底，防止死循环和崩溃。"
 """
-from typing import Any, Dict, List
+from typing import Any, Callable, Dict, List, Optional
 
 from config import config
 from llm_client import LLMClient
@@ -35,7 +35,9 @@ SYSTEM_PROMPT = """你是一个严谨的 AI 助手，可以使用工具来完成
 
 
 class Agent:
-    def __init__(self, system_prompt: str = SYSTEM_PROMPT, client=None) -> None:
+    def __init__(self, system_prompt: str = SYSTEM_PROMPT, client=None,
+                 history: Optional[List[Dict[str, Any]]] = None,
+                 on_turn_end: Optional[Callable[[List[Dict[str, Any]]], None]] = None) -> None:
         # client 可注入 —— 这是依赖注入（DI）的最小用法：
         #   生产代码传真实客户端；测试时传"假模型"，就能在不花 token、
         #   不需要 API key 的情况下验证整个循环逻辑。
@@ -43,7 +45,21 @@ class Agent:
         #   → 那样 Agent 就和网络绑死了，没法单测。
         self.client = client if client is not None else LLMClient()
         self.tools = get_tool_schemas()
-        self.history: List[Dict[str, Any]] = [{"role": "system", "content": system_prompt}]
+
+        # history 也可注入 —— 用于"从数据库恢复上次的对话"。
+        # 如果不传，就从零开始（只有 system 提示词）。
+        if history:
+            self.history: List[Dict[str, Any]] = list(history)
+        else:
+            self.history = [{"role": "system", "content": system_prompt}]
+
+        # on_turn_end 回调：每轮对话结束后调用，参数是当前的 history。
+        # 为什么用【回调】而不是让 Agent 直接 import storage？
+        #   ① 解耦：Agent 不用知道数据存在哪（SQLite / Redis / 文件都行）
+        #   ② 可测：测试时传 None，Agent 就完全不碰存储
+        #   这和 client 的注入是同一个思路 —— 依赖由外部提供，而不是内部写死。
+        self.on_turn_end = on_turn_end
+
         self.trace: List[str] = []  # 调用轨迹，便于调试和面试展示
 
     # ---------- 上下文管理：控制 token 成本 ----------
@@ -60,6 +76,20 @@ class Agent:
 
     # ---------- 主循环 ----------
     def chat(self, user_input: str) -> str:
+        """对外的入口：跑一轮对话，然后持久化。
+
+        为什么要拆成 chat() + _run()：
+          循环里有【两个返回点】（正常回答 / 轮次耗尽走兜底）。
+          如果直接在 chat() 里写，两个 return 前都要复制一遍"存盘"代码 ——
+          容易漏。拆开之后，存盘只在 chat() 里写一次，两条路径都走到。
+        """
+        answer = self._run(user_input)
+        # 每轮结束后把最新 history 交给外部（如果有回调）
+        if self.on_turn_end is not None:
+            self.on_turn_end(self.history)
+        return answer
+
+    def _run(self, user_input: str) -> str:
         self.history.append({"role": "user", "content": user_input})
         # 裁剪必须放在"追加用户消息之后"：我们要限制的是**真正发出去的 payload**。
         # 踩过的坑：原来放在 append 之前，于是每轮 payload 都比上限多 2 条
@@ -107,3 +137,5 @@ class Agent:
     def reset(self) -> None:
         self.history = [self.history[0]]
         self.trace = []
+        if self.on_turn_end is not None:
+            self.on_turn_end(self.history)

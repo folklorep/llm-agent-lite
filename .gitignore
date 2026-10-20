@@ -18,3 +18,7 @@ data/rerank_cache.json
 # 评测运行产物
 rerank_50q_result.txt
 data/rerank_cache.json
+
+# 运行时数据：SQLite 会话库（含用户对话，不进仓库）
+data/sessions.db
+data/*.db

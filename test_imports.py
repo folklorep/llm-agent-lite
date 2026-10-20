@@ -242,13 +242,31 @@ def test_sessions(api) -> None:
     print("\n[4] 会话管理")
     created: list = []
 
+    # ⚠️ 关键隔离：把存储层换成【内存库】。
+    #    否则这个测试会创建上百个会话，全都写进真实的 data/sessions.db，
+    #    把用户的真实对话数据淹掉（我第一版就是这样，库里积了 110 个垃圾会话）。
+    api.configure_store(":memory:")
+
     class FakeAgent:
-        def __init__(self):
-            self.history = []
+        # ⚠️ 必须接受和真 Agent 一样的参数 —— 否则 api.py 新增参数时
+        #    这里会抛 TypeError，而且【测试会中途崩溃】而不是报 FAIL。
+        #    我加 history / on_turn_end 参数时就在这里踩了一次（exit code 1）。
+        def __init__(self, system_prompt=None, client=None,
+                     history=None, on_turn_end=None):
+            self.history = history if history else []
+            self.client = client
+            self.on_turn_end = on_turn_end
             created.append(self)
 
         def reset(self):
             self.history = []
+
+        def chat(self, msg):
+            self.history.append({"role": "user", "content": msg})
+            self.history.append({"role": "assistant", "content": "假回复"})
+            if self.on_turn_end is not None:
+                self.on_turn_end(self.history)
+            return "假回复"
 
     import config
     saved_class_key = config.Config.API_KEY
