@@ -22,3 +22,6 @@ data/rerank_cache.json
 # 运行时数据：SQLite 会话库（含用户对话，不进仓库）
 data/sessions.db
 data/*.db
+
+# 本地学习笔记，不入库
+项目笔记.md
